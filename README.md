@@ -92,4 +92,3 @@ services.litellm = {
 ## License
 
 MIT
-```
