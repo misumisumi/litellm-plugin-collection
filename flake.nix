@@ -10,7 +10,8 @@
 
       pythonVersion = pkgs: pkgs.python3.pythonVersion;
 
-      # Build the plugin collection as a proper Python package (separate build).
+      sitePackages = { pkgs, pkg }: "${pkg}/lib/python${pythonVersion pkgs}/site-packages";
+
       mkPluginPkg = { pkgs }:
         pkgs.python3Packages.buildPythonPackage {
           pname = "litellm-plugin-collection";
@@ -22,29 +23,49 @@
           doCheck = false;
         };
 
-      # Wrap pkgs.litellm so the plugin package is importable at runtime.
-      mkLitellmWithPlugin = { pkgs, litellm ? pkgs.litellm }:
+      # extraPackages: list of paths or derivations to add to PYTHONPATH
+      toPythonPath = { pkgs, items }:
+        pkgs.lib.concatStringsSep ":" (map (item:
+          if pkgs.lib.isPath item then toString item
+          else sitePackages { inherit pkgs; pkg = item; }
+        ) items);
+
+      mkLitellmWithPlugin = { pkgs
+                            , litellm ? pkgs.litellm
+                            , pluginSrc ? ./.
+                            , websockets ? pkgs.python3Packages.websockets
+                            , extraPackages ? [ ]
+                            }:
         let
           pluginPkg = mkPluginPkg { inherit pkgs; };
-          pluginSitePackages = "${pluginPkg}/lib/python${pythonVersion pkgs}/site-packages";
+          pluginSitePackages = sitePackages { inherit pkgs; pkg = pluginPkg; };
+          websocketsSitePackages = sitePackages { inherit pkgs; pkg = websockets; };
+          extraPath = toPythonPath { inherit pkgs; items = extraPackages; };
+          basePythonPath = pkgs.lib.concatStringsSep ":" (pkgs.lib.filter (x: x != "") [
+            pluginSitePackages
+            websocketsSitePackages
+            extraPath
+          ]);
+          drv = pkgs.writeShellApplication {
+            name = "litellm";
+            runtimeInputs = [ litellm websockets ] ++ extraPackages;
+            text = ''
+              export PYTHONPATH="${basePythonPath}''${PYTHONPATH:+:$PYTHONPATH}"
+              exec ${litellm}/bin/litellm "$@"
+            '';
+            passthru = {
+              withPlugins = plugins:
+                mkLitellmWithPlugin {
+                  inherit pkgs litellm pluginSrc websockets;
+                  extraPackages = extraPackages ++ plugins;
+                };
+            };
+          };
         in
-        pkgs.writeShellApplication {
-          name = "litellm";
-          runtimeInputs = [ litellm pkgs.python3Packages.websockets ];
-          text = ''
-            export PYTHONPATH="${pluginSitePackages}''${PYTHONPATH:+:$PYTHONPATH}"
-            exec ${litellm}/bin/litellm "$@"
-          '';
-        };
+        drv;
     in {
       packages = forAllSystems (pkgs: {
-        default = mkLitellmWithPlugin { inherit pkgs; } // {
-          meta = with pkgs.lib; {
-            description = "litellm with Quinella plugin collection";
-            license = licenses.mit;
-            platforms = platforms.all;
-          };
-        };
+        default = mkLitellmWithPlugin { inherit pkgs; };
         plugin = mkPluginPkg { inherit pkgs; };
         llmlingua = pkgs.callPackage ./llmlingua.nix { };
       });
@@ -54,7 +75,7 @@
       };
 
       lib = {
-        inherit mkLitellmWithPlugin mkPluginPkg;
+        inherit mkLitellmWithPlugin mkPluginPkg toPythonPath;
       };
     };
 }
