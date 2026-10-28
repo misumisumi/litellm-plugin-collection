@@ -1,0 +1,52 @@
+model_list:
+  - model_name: cheap-flash
+    litellm_params: { model: opencode-go/glm-5.3-flash, api_key: os.environ/OPENCODE_API_KEY }
+  - model_name: kimi-code
+    litellm_params: { model: opencode-go/kimi-k2.7-code, api_key: os.environ/OPENCODE_API_KEY }
+  - model_name: claude-sonnet
+    litellm_params: { model: openrouter/anthropic/claude-sonnet-5, api_key: os.environ/OPENROUTER_API_KEY }
+
+  - model_name: quinella-main
+    litellm_params:
+      model: auto_router/complexity_router
+      complexity_router_config:
+        tiers:
+          mechanical: [cheap-flash]
+          routine:    [cheap-flash, kimi-code]
+          complex:    [kimi-code, claude-sonnet]
+          deep:       [claude-sonnet]
+        classifier_type: jev
+        jev_classifier_config:
+          model: jev-latest
+          api_key: os.environ/TYPESAFE_API_KEY
+          timeout_ms: 2500
+        classifier_fallback: heuristic
+        adaptive: true
+        session_affinity: true
+        session_affinity_ttl_seconds: 600
+      complexity_router_default_model: kimi-code
+
+guardrails:
+  - guardrail_name: dcp-pruner
+    litellm_params:
+      guardrail: litellm_plugin_collection.dcp_pruner.guardrail
+      mode: pre_call
+      targets: ["tool", "tool_result"]
+  - guardrail_name: llmlingua-2
+    litellm_params:
+      guardrail: litellm_plugin_collection.llmlingua_compressor.guardrail
+      mode: pre_call
+      targets: ["system", "user", "assistant"]
+      cache_aware: true
+  - guardrail_name: headroom-comp
+    litellm_params: { guardrail: headroom, mode: pre_call }
+  - guardrail_name: context-budget
+    litellm_params:
+      guardrail: litellm_plugin_collection.context_budget.guardrail
+      mode: pre_call
+  - guardrail_name: compression-summary
+    litellm_params:
+      guardrail: litellm_plugin_collection.compression_summary.guardrail
+      mode: pre_call
+  - guardrail_name: loop-guard
+    litellm_params: { guardrail: litellm_plugin_collection.loop_guard.guardrail, mode: pre_call }

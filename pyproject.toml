@@ -1,0 +1,20 @@
+[project]
+name = "litellm-plugin-collection"
+version = "0.1.0"
+description = "Quinella features (DCP, llmlingua-2, loop guard, context budget) as litellm plugins"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.94.0",
+]
+
+[project.optional-dependencies]
+llmlingua = ["llmlingua>=0.2.0"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["litellm_plugin_collection*"]
