@@ -1,0 +1,295 @@
+"""Behaviour tests for the guardrail plugins.
+
+Run with ``python -m unittest discover -s tests -v``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import unittest
+from typing import Any
+
+from litellm_plugin_collection.compression_summary.guardrail import CompressionSummaryGuardrail
+from litellm_plugin_collection.context_budget.guardrail import ContextBudgetGuardrail
+from litellm_plugin_collection.dcp_pruner.guardrail import DCPPrunder
+from litellm_plugin_collection.llmlingua_compressor.guardrail import LLMLingua2Compressor
+from litellm_plugin_collection.loop_guard.guardrail import LoopGuard
+
+
+def _request(messages: list[Any], session: str | None = None) -> dict[str, Any]:
+    data: dict[str, Any] = {"messages": messages, "litellm_metadata": {}}
+    if session is not None:
+        data["x-opencode-session"] = session
+    return data
+
+
+def _apply(guardrail: Any, messages: list[Any], session: str | None = None):
+    data = _request(messages, session)
+    inputs = {"structured_messages": messages, "texts": []}
+    result = asyncio.run(
+        guardrail.apply_guardrail(
+            inputs=inputs,
+            request_data=data,
+            input_type="request",
+            logging_obj=None,
+        )
+    )
+    return result, data
+
+
+def _tool_result(text: str) -> list[dict[str, Any]]:
+    return [{"type": "tool_result", "tool_use_id": "t1", "content": text}]
+
+
+class LoopGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # LoopGuard.__init__ passes kwargs to litellm's base class; those are benign.
+        self.guard = LoopGuard(max_repeats=3)
+
+    def _call(self, messages, session: str | None = "s1") -> None:
+        _apply(self.guard, messages, session)
+
+    def test_tool_result_only_continuations_do_not_trigger(self):
+        # This is the production regression: role=user messages carrying only a
+        # tool_result have no human text. They must not hash as empty requests.
+        base = [{"role": "user", "content": "Fix the bug"}]
+        for i in range(5):
+            messages = [
+                *base,
+                {"role": "assistant", "content": f"step {i}"},
+                {"role": "user", "content": _tool_result(f"tool output {i}")},
+            ]
+            self._call(messages)
+
+    def test_tool_result_with_extra_text_is_still_a_continuation(self):
+        for i in range(5):
+            messages = [
+                {"role": "user", "content": "Use the tool"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "continue"},
+                    {"type": "tool_result", "content": f"result {i}"},
+                ]},
+            ]
+            self._call(messages)
+
+    def test_same_turn_with_reasoning_and_tools_does_not_trigger(self):
+        for i in range(6):
+            messages = [
+                {"role": "user", "content": "Investigate the failing test"},
+                {"role": "assistant", "content": f"thinking {i}"},
+            ]
+            if i:
+                messages.append({"role": "tool", "tool_call_id": "t", "content": f"result {i}"})
+            self._call(messages)
+
+    def test_three_distinct_identical_user_turns_trigger(self):
+        turn = {"role": "user", "content": "same request"}
+        self._call([turn])
+        self._call([turn, {"role": "assistant", "content": "a"}, turn])
+        with self.assertRaises(Exception) as ctx:
+            self._call(
+                [
+                    turn,
+                    {"role": "assistant", "content": "a"},
+                    turn,
+                    {"role": "assistant", "content": "b"},
+                    turn,
+                ]
+            )
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+    def test_first_request_with_repeated_history_does_not_trigger(self):
+        # A single request that happens to contain a repeated phrase in its
+        # history must not be blocked before the guard has observed any loop.
+        turn = {"role": "user", "content": "continue"}
+        self._call([turn, {"role": "assistant", "content": "a"}, turn,
+                    {"role": "assistant", "content": "b"}, turn])
+
+    def test_rewritten_history_resets_baseline(self):
+        a = {"role": "user", "content": "alpha"}
+        b = {"role": "user", "content": "beta"}
+        c = {"role": "user", "content": "gamma"}
+        self._call([a, b])
+        # Compaction removed the first turn. This must not be interpreted as a
+        # new identical user request.
+        self._call([c])
+        self._call([c, {"role": "assistant", "content": "x"}, c])
+        # Only the third genuinely appended identical turn trips the guard.
+        with self.assertRaises(Exception):
+            self._call([c, {"role": "assistant", "content": "x"}, c,
+                        {"role": "assistant", "content": "y"}, c])
+
+    def test_different_user_turns_do_not_trigger(self):
+        for i in range(5):
+            self._call([{"role": "user", "content": f"request {i}"}])
+
+    def test_missing_session_fails_open(self):
+        turn = {"role": "user", "content": "same request"}
+        for _ in range(5):
+            self._call([turn], session=None)
+
+    def test_sessions_are_isolated(self):
+        turn = {"role": "user", "content": "same request"}
+        self._call([turn], session="a")
+        self._call([turn], session="b")
+        # Each session is on its first observed request; neither should trip.
+        self._call([turn, {"role": "assistant", "content": "x"}, turn], session="a")
+        self._call([turn, {"role": "assistant", "content": "x"}, turn], session="b")
+
+
+class DCPTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.guard = DCPPrunder()
+
+    def test_duplicate_tool_outputs_are_replaced(self):
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "tool", "tool_call_id": "1", "content": "same output"},
+            {"role": "tool", "tool_call_id": "2", "content": "same output"},
+        ]
+        result, _ = _apply(self.guard, messages)
+        out = result["structured_messages"]
+        self.assertEqual(out[1]["content"], "same output")
+        self.assertEqual(out[2]["content"], "[DCP: duplicate tool result removed]")
+
+    def test_long_tool_output_is_truncated(self):
+        text = "\n".join(f"line {i}" for i in range(60))
+        result, _ = _apply(self.guard, [{"role": "tool", "content": text}])
+        content = result["structured_messages"][0]["content"]
+        self.assertIn("lines elided by DCP", content)
+        self.assertIn("line 59", content)
+
+    def test_nested_tool_result_is_pruned(self):
+        text = "\n".join(f"line {i}" for i in range(60))
+        messages = [{"role": "user", "content": [{"type": "tool_result", "content": text}]}]
+        result, _ = _apply(self.guard, messages)
+        part = result["structured_messages"][0]["content"][0]
+        self.assertIn("lines elided by DCP", part["content"])
+
+    def test_stats_do_not_leak_into_request_payload(self):
+        _, data = _apply(self.guard, [{"role": "tool", "content": "x"}])
+        self.assertNotIn("_compression_original_tokens", data)
+        self.assertIn("_compression_original_tokens", data["litellm_metadata"])
+
+    def test_non_tool_messages_are_untouched(self):
+        messages = [{"role": "user", "content": "a" * 1000}]
+        result, _ = _apply(self.guard, messages)
+        self.assertEqual(result["structured_messages"][0]["content"], "a" * 1000)
+
+    def test_duplicate_masking_keeps_user_text_parts(self):
+        content = [
+            {"type": "text", "text": "keep me"},
+            {"type": "tool_result", "content": "same output"},
+        ]
+        messages = [
+            {"role": "user", "content": content},
+            {"role": "user", "content": content},
+        ]
+        result, _ = _apply(self.guard, messages)
+        out = result["structured_messages"][1]["content"]
+        self.assertEqual(out[0]["text"], "keep me")
+        self.assertEqual(out[1]["content"], "[DCP: duplicate tool result removed]")
+
+
+class CompressionSummaryTests(unittest.TestCase):
+    def test_reads_original_tokens_from_litellm_metadata(self):
+        guard = CompressionSummaryGuardrail()
+        captured: list[dict[str, Any]] = []
+        guard.add_standard_logging_guardrail_information_to_request_data = (  # type: ignore[method-assign]
+            lambda **kwargs: captured.append(kwargs)
+        )
+        messages = [{"role": "user", "content": "compressed"}]
+        data = _request(messages)
+        data["litellm_metadata"]["_compression_original_tokens"] = 1000
+        result = asyncio.run(
+            guard.apply_guardrail(
+                inputs={"structured_messages": messages, "texts": []},
+                request_data=data,
+                input_type="request",
+                logging_obj=None,
+            )
+        )
+        self.assertEqual(result["structured_messages"], messages)
+        stats = captured[0]["guardrail_json_response"]
+        self.assertEqual(stats["tokens_before"], 1000)
+        self.assertGreater(stats["tokens_saved"], 0)
+
+
+class LLMLinguaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.guard = LLMLingua2Compressor(cache_aware=True)
+        self.guard._compressor = None  # exercise the deterministic fallback
+
+    def test_filler_is_removed_without_losing_structure(self):
+        text = "Please just fix this.\n- keep the list\n```python\nprint('hi')\n```"
+        result, _ = _apply(self.guard, [{"role": "user", "content": text}])
+        out = result["structured_messages"][0]["content"]
+        self.assertNotIn("just", out)
+        self.assertIn("\n- keep the list", out)
+        self.assertIn("```python\nprint('hi')\n```", out)
+
+    def test_tool_role_is_not_compressed(self):
+        text = "please just " + "x" * 200
+        result, _ = _apply(self.guard, [{"role": "tool", "content": text}])
+        self.assertEqual(result["structured_messages"][0]["content"], text)
+
+    def test_system_is_skipped_for_cached_request(self):
+        messages = [
+            {"role": "system", "content": "please just keep this system prompt"},
+            {"role": "user", "content": "please just do it"},
+        ]
+        data = _request(messages)
+        messages[0]["content"] = [
+            {"type": "text", "text": "please just keep this system prompt", "cache_control": {"type": "ephemeral"}}
+        ]
+        result = asyncio.run(
+            self.guard.apply_guardrail(
+                inputs={"structured_messages": messages, "texts": []},
+                request_data=data,
+                input_type="request",
+                logging_obj=None,
+            )
+        )
+        self.assertEqual(
+            result["structured_messages"][0]["content"][0]["text"],
+            "please just keep this system prompt",
+        )
+
+    def test_empty_or_short_text_is_not_blanked(self):
+        result, _ = _apply(self.guard, [{"role": "user", "content": "OK"}])
+        self.assertEqual(result["structured_messages"][0]["content"], "OK")
+
+
+class ContextBudgetTests(unittest.TestCase):
+    def test_system_and_latest_turn_are_preserved(self):
+        guard = ContextBudgetGuardrail(
+            context_limit=200, safety_ratio=0.9, reserve_output_tokens=0
+        )
+        system = {"role": "system", "content": "system prompt " * 10}
+        old_turn = [
+            {"role": "user", "content": "old request " * 20},
+            {"role": "assistant", "content": "old answer " * 20},
+        ]
+        latest = [
+            {"role": "user", "content": "latest request"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "1", "content": "tool result"},
+        ]
+        messages = [system, *old_turn, *latest]
+        result, _ = _apply(guard, messages)
+        out = result["structured_messages"]
+        self.assertIs(out[0], system)
+        # The whole latest turn survives, including the tool result.
+        self.assertEqual(out[-3:], latest)
+
+    def test_under_budget_is_untouched(self):
+        guard = ContextBudgetGuardrail(context_limit=10000, safety_ratio=0.9)
+        messages = [{"role": "user", "content": "hi"}]
+        result, _ = _apply(guard, messages)
+        self.assertEqual(result["structured_messages"], messages)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -17,8 +17,11 @@ def _content_to_text(content: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")))
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif item.get("type") == "tool_result":
+                    parts.append(_content_to_text(item.get("content", "")))
             elif isinstance(item, str):
                 parts.append(item)
         return "\n".join(parts)
@@ -52,7 +55,13 @@ class CompressionSummaryGuardrail(CustomGuardrail):
         tokens_after = _estimate_tokens(structured)
         original = None
         if isinstance(request_data, dict):
-            original = request_data.get("_compression_original_tokens")
+            bucket = request_data.get("litellm_metadata")
+            if isinstance(bucket, dict):
+                original = bucket.get("_compression_original_tokens")
+            if original is None:
+                # Backwards compatibility with an older DCP release that wrote
+                # the marker at the top level.
+                original = request_data.get("_compression_original_tokens")
         if not isinstance(original, int) or original <= 0:
             original = tokens_after
         tokens_saved = original - tokens_after

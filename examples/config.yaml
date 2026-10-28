@@ -27,6 +27,10 @@ model_list:
       complexity_router_default_model: kimi-code
 
 guardrails:
+  # Keep loop-guard first: it must see the user's original text, before the
+  # compression guardrails rewrite the conversation.
+  - guardrail_name: loop-guard
+    litellm_params: { guardrail: litellm_plugin_collection.loop_guard.guardrail, mode: pre_call }
   - guardrail_name: dcp-pruner
     litellm_params:
       guardrail: litellm_plugin_collection.dcp_pruner.guardrail
@@ -48,5 +52,3 @@ guardrails:
     litellm_params:
       guardrail: litellm_plugin_collection.compression_summary.guardrail
       mode: pre_call
-  - guardrail_name: loop-guard
-    litellm_params: { guardrail: litellm_plugin_collection.loop_guard.guardrail, mode: pre_call }

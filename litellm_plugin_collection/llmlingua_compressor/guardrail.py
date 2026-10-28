@@ -37,12 +37,16 @@ def _text_to_content(original: Any, text: str) -> Any:
     if isinstance(original, str):
         return text
     if isinstance(original, list):
-        out: list[Any] = []
-        for item in original:
-            if isinstance(item, dict) and item.get("type") == "text":
-                out.append({**item, "text": text})
-            else:
-                out.append(item)
+        slots = [
+            i
+            for i, item in enumerate(original)
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        if len(slots) != 1:
+            return original
+        index = slots[0]
+        out = list(original)
+        out[index] = {**original[index], "text": text}
         return out
     return text
 
@@ -54,17 +58,31 @@ _FILLER_WORDS = {
 
 
 def _lite_compress(text: str) -> str:
-    """Fallback lite compression when llmlingua-2 is unavailable."""
-    words = text.split()
-    out: list[str] = []
-    for w in words:
-        if w.lower().strip(".,!?") in _FILLER_WORDS:
+    """Fallback lite compression when llmlingua-2 is unavailable.
+
+    Operates line by line so markdown structure and code blocks survive. A
+    word-level join over the whole prompt would collapse every newline and
+    destroy lists, tables and code.
+    """
+    lines: list[str] = []
+    in_code = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            lines.append(line)
             continue
-        out.append(w)
-    result = " ".join(out)
-    # collapse whitespace
-    lines = [ln.rstrip() for ln in result.splitlines()]
-    return "\n".join(ln for ln in lines if ln.strip()).strip()
+        if in_code:
+            lines.append(line)
+            continue
+        indent = line[: len(line) - len(stripped)]
+        words = [
+            word
+            for word in stripped.split()
+            if word.lower().strip(".,!?") not in _FILLER_WORDS
+        ]
+        lines.append((indent + " ".join(words)).rstrip())
+    return "\n".join(lines).strip()
 
 
 class LLMLingua2Compressor(CustomGuardrail):
@@ -93,6 +111,18 @@ class LLMLingua2Compressor(CustomGuardrail):
         metadata = request_data.get("metadata") or {}
         if isinstance(metadata, dict) and metadata.get("prompt_caching"):
             return True
+        # Anthropic/OpenAI-style prompt caching is usually requested on a
+        # message content part, not at the top level of the request.
+        messages = request_data.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict) and message.get("cache_control") is not None:
+                    return True
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("cache_control") is not None:
+                            return True
         return False
 
     def _compress_text(self, text: str) -> str:
@@ -102,11 +132,14 @@ class LLMLingua2Compressor(CustomGuardrail):
             try:
                 out = self._compressor.compress_prompt(text, ratio=0.75)  # type: ignore[attr-defined]
                 if isinstance(out, dict):
-                    return out.get("compressed_prompt", text)
-                return str(out)
+                    compressed = out.get("compressed_prompt", text)
+                else:
+                    compressed = str(out)
+                return compressed if isinstance(compressed, str) and compressed.strip() else text
             except Exception:
                 pass
-        return _lite_compress(text)
+        compressed = _lite_compress(text)
+        return compressed if compressed.strip() else text
 
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
         if input_type != "request":
@@ -136,8 +169,11 @@ class LLMLingua2Compressor(CustomGuardrail):
                 out.append(msg)
                 continue
             compressed = self._compress_text(text)
-            new_msg = {**msg, "content": _text_to_content(msg.get("content"), compressed)}
-            out.append(new_msg)
+            if compressed == text:
+                out.append(msg)
+                continue
+            new_content = _text_to_content(msg.get("content"), compressed)
+            out.append(msg if new_content is msg.get("content") else {**msg, "content": new_content})
         tokens_after = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in out)
         ratio = round(1 - (tokens_after / tokens_before), 4) if tokens_before > 0 else 0.0
         try:

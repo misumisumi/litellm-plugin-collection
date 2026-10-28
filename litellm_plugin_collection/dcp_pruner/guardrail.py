@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
 from typing import Any
 
 try:
@@ -33,15 +33,40 @@ def _text_to_content(original: Any, text: str) -> Any:
     if isinstance(original, str):
         return text
     if isinstance(original, list):
-        # replace text parts, keep structure
+        # Only rewrite a single text/tool_result slot. Splitting one combined
+        # string across several parts would duplicate or reorder content.
+        slots = [
+            i
+            for i, item in enumerate(original)
+            if isinstance(item, dict) and item.get("type") in ("text", "tool_result")
+        ]
+        if len(slots) != 1:
+            return original
+        index = slots[0]
+        item = original[index]
+        out = list(original)
+        if item.get("type") == "tool_result":
+            out[index] = {**item, "content": text}
+        else:
+            out[index] = {**item, "text": text}
+        return out
+    return text
+
+
+def _mask_duplicate(content: Any) -> Any:
+    """Replace only the tool-result portion, preserving any user text parts."""
+    placeholder = "[DCP: duplicate tool result removed]"
+    if isinstance(content, str):
+        return placeholder
+    if isinstance(content, list):
         out: list[Any] = []
-        for item in original:
-            if isinstance(item, dict) and item.get("type") == "text":
-                out.append({**item, "text": text})
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                out.append({**item, "content": placeholder})
             else:
                 out.append(item)
         return out
-    return text
+    return placeholder
 
 
 def _prune_tool_text(text: str, max_lines: int = 40) -> str:
@@ -80,15 +105,22 @@ class DCPPrunder(CustomGuardrail):
         structured = inputs.get("structured_messages") if isinstance(inputs, dict) else None
         if not isinstance(structured, list):
             return inputs
-        # snapshot original token count for overall stats (first compression guardrail)
-        if isinstance(request_data, dict) and "_compression_original_tokens" not in request_data:
-            request_data["_compression_original_tokens"] = sum(
-                len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in structured
-            )
+        tokens_before = sum(
+            len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1
+            for m in structured
+        )
+        # Snapshot the original token count for the later summary guardrail.
+        # Keep it in LiteLLM's internal metadata bucket: a top-level custom key
+        # would be part of the request that is sent to the upstream provider.
+        if isinstance(request_data, dict):
+            bucket = request_data.get("litellm_metadata")
+            if not isinstance(bucket, dict):
+                bucket = {}
+                request_data["litellm_metadata"] = bucket
+            bucket.setdefault("_compression_original_tokens", tokens_before)
         # dedup tracking
         seen: set[str] = set()
         out: list[Any] = []
-        tokens_before = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in structured)
         for msg in structured:
             if not isinstance(msg, dict):
                 out.append(msg)
@@ -97,15 +129,17 @@ class DCPPrunder(CustomGuardrail):
                 out.append(msg)
                 continue
             text = _content_to_text(msg.get("content"))
-            key = text[:200]
+            key = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
             if key in seen:
-                new_msg = {**msg, "content": "[DCP: duplicate tool result removed]"}
-                out.append(new_msg)
+                out.append({**msg, "content": _mask_duplicate(msg.get("content"))})
                 continue
             seen.add(key)
             pruned = _prune_tool_text(text)
-            new_msg = {**msg, "content": _text_to_content(msg.get("content"), pruned)}
-            out.append(new_msg)
+            if pruned == text:
+                out.append(msg)
+                continue
+            new_content = _text_to_content(msg.get("content"), pruned)
+            out.append(msg if new_content is msg.get("content") else {**msg, "content": new_content})
         tokens_after = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in out)
         ratio = round(1 - (tokens_after / tokens_before), 4) if tokens_before > 0 else 0.0
         try:
