@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from litellm_plugin_collection._preservation import truncate_preserved
+
 try:
     from litellm.integrations.custom_guardrail import CustomGuardrail
 except Exception:  # pragma: no cover
@@ -99,7 +101,7 @@ class ContextBudgetGuardrail(CustomGuardrail):
             # truncate oversized older messages
             text = _content_to_text(msg.get("content"))
             if len(text) > 500:
-                truncated = text[:500] + "\n[truncated]"
+                truncated = truncate_preserved(text, 500)
                 new_content = _text_to_content(msg.get("content"), truncated)
                 out.append(msg if new_content is msg.get("content") else {**msg, "content": new_content})
             else:

@@ -40,8 +40,9 @@ guardrails:
     litellm_params:
       guardrail: litellm_plugin_collection.llmlingua_compressor.guardrail
       mode: pre_call
-      targets: ["system", "user", "assistant"]
+      targets: ["user", "assistant"]
       cache_aware: true
+      compress_system: false
   - guardrail_name: headroom-comp
     litellm_params: { guardrail: headroom, mode: pre_call }
   - guardrail_name: context-budget

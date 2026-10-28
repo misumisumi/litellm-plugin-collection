@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
+
+# Lines worth keeping when a long tool output is elided. Error/stack-trace
+# lines, file paths and URLs are usually the reason the model asked for the
+# output in the first place.
+_IMPORTANT_LINE_RE = re.compile(
+    r"(?:Traceback|(?:Error|Exception):|File \".{1,300}\", line \d+|"
+    r"^\s*at\s+\S|\bhttps?://|(?<!\S)(?:\.{0,2}/|[A-Za-z]:\\[A-Za-z0-9_.\\/-]+)|"
+    r"^#{1,6}\s+)",
+    re.IGNORECASE,
+)
 
 try:
     from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -76,7 +87,20 @@ def _prune_tool_text(text: str, max_lines: int = 40) -> str:
         return "\n".join(line.rstrip() for line in lines).strip()
     head = lines[:20]
     tail = lines[-5:]
-    elided = len(lines) - 25
+    middle = lines[20:-5]
+    important: list[str] = []
+    for line in middle:
+        if _IMPORTANT_LINE_RE.search(line):
+            important.append(line)
+            if len(important) >= 10:
+                break
+    elided = len(middle) - len(important)
+    if important:
+        marker = (
+            f"... [{elided} lines elided by DCP; "
+            f"{len(important)} important lines kept] ..."
+        )
+        return "\n".join(head + [marker] + important + tail)
     return "\n".join(head + [f"... [{elided} lines elided by DCP] ..."] + tail)
 
 

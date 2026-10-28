@@ -176,6 +176,16 @@ class DCPTests(unittest.TestCase):
         result, _ = _apply(self.guard, messages)
         self.assertEqual(result["structured_messages"][0]["content"], "a" * 1000)
 
+    def test_important_error_line_survives_elision(self):
+        lines = [f"line {i}" for i in range(60)]
+        lines[30] = "TypeError: cannot read property 'x' of undefined"
+        result, _ = _apply(self.guard, [{"role": "tool", "content": "\n".join(lines)}])
+        content = result["structured_messages"][0]["content"]
+        self.assertIn("TypeError: cannot read property", content)
+        self.assertIn("important lines kept", content)
+        self.assertIn("line 0", content)
+        self.assertIn("line 59", content)
+
     def test_duplicate_masking_keeps_user_text_parts(self):
         content = [
             {"type": "text", "text": "keep me"},
@@ -259,6 +269,47 @@ class LLMLinguaTests(unittest.TestCase):
         result, _ = _apply(self.guard, [{"role": "user", "content": "OK"}])
         self.assertEqual(result["structured_messages"][0]["content"], "OK")
 
+    def test_system_prompt_is_preserved_by_default(self):
+        text = "Please just keep this system prompt and never drop it."
+        result, _ = _apply(self.guard, [{"role": "system", "content": text}])
+        self.assertEqual(result["structured_messages"][0]["content"], text)
+
+    def test_system_prompt_can_be_compressed_when_enabled(self):
+        guard = LLMLingua2Compressor(compress_system=True)
+        guard._compressor = None
+        text = "Please just keep this system prompt and never drop it."
+        result, _ = _apply(guard, [{"role": "system", "content": text}])
+        out = result["structured_messages"][0]["content"]
+        self.assertNotIn("just", out)
+        self.assertIn("never", out)
+
+    def test_preserves_instructions_negations_and_technical_tokens(self):
+        text = (
+            "Please just explain this. You must not remove it or ever forget.\n"
+            "Visit https://example.com/docs and read `config.yaml`.\n"
+            "Use ./src/main.py with process.env.HOME and version 1.2.3.\n"
+            "API_KEY=abcdef123456"
+        )
+        result, _ = _apply(self.guard, [{"role": "user", "content": text}])
+        out = result["structured_messages"][0]["content"]
+        self.assertNotIn("just", out)
+        self.assertIn("must not", out)
+        self.assertIn("ever", out)
+        self.assertIn("https://example.com/docs", out)
+        self.assertIn("`config.yaml`", out)
+        self.assertIn("./src/main.py", out)
+        self.assertIn("process.env.HOME", out)
+        self.assertIn("1.2.3", out)
+        self.assertIn("API_KEY=abcdef123456", out)
+
+    def test_system_reminder_envelope_is_not_rewritten(self):
+        text = "Please just keep <system-reminder>please just keep me</system-reminder> intact."
+        result, _ = _apply(self.guard, [{"role": "user", "content": text}])
+        out = result["structured_messages"][0]["content"]
+        self.assertIn(
+            "<system-reminder>please just keep me</system-reminder>", out
+        )
+
 
 class ContextBudgetTests(unittest.TestCase):
     def test_system_and_latest_turn_are_preserved(self):
@@ -283,6 +334,21 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertIs(out[0], system)
         # The whole latest turn survives, including the tool result.
         self.assertEqual(out[-3:], latest)
+
+    def test_truncation_keeps_fenced_code_intact(self):
+        guard = ContextBudgetGuardrail(
+            context_limit=400, safety_ratio=0.9, reserve_output_tokens=0
+        )
+        long_old = "```python\nprint('keep me')\n```\n" + ("prose " * 300)
+        messages = [
+            {"role": "user", "content": long_old},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "latest"},
+        ]
+        result, _ = _apply(guard, messages)
+        old_content = result["structured_messages"][0]["content"]
+        self.assertIn("```python\nprint('keep me')\n```", old_content)
+        self.assertIn("[truncated]", old_content)
 
     def test_under_budget_is_untouched(self):
         guard = ContextBudgetGuardrail(context_limit=10000, safety_ratio=0.9)

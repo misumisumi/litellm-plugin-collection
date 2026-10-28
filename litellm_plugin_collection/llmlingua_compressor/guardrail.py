@@ -1,8 +1,14 @@
-"""llmlingua-2 based compressor for text (system/user/assistant) only."""
+"""llmlingua-2 based compressor for user/assistant prose only.
+
+System prompts are preserved by default, and code, instructions, identifiers,
+paths, URLs, errors, secrets and negations are shielded from the compressor.
+"""
 
 from __future__ import annotations
 
 from typing import Any
+
+from litellm_plugin_collection._preservation import split_prose_and_preserved
 
 try:
     from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -60,21 +66,18 @@ _FILLER_WORDS = {
 def _lite_compress(text: str) -> str:
     """Fallback lite compression when llmlingua-2 is unavailable.
 
-    Operates line by line so markdown structure and code blocks survive. A
-    word-level join over the whole prompt would collapse every newline and
-    destroy lists, tables and code.
+    Operates line by line so markdown structure survives. Preserved spans
+    (code, paths, negations, ...) have already been split out by the caller.
     """
+    if not text.strip():
+        return text
+    leading = text[: len(text) - len(text.lstrip())]
+    trailing = text[len(text.rstrip()):] if text.rstrip() else ""
+    end = len(text) - len(trailing) if trailing else len(text)
+    core = text[len(leading):end]
     lines: list[str] = []
-    in_code = False
-    for line in text.splitlines():
+    for line in core.splitlines():
         stripped = line.lstrip()
-        if stripped.startswith("```"):
-            in_code = not in_code
-            lines.append(line)
-            continue
-        if in_code:
-            lines.append(line)
-            continue
         indent = line[: len(line) - len(stripped)]
         words = [
             word
@@ -82,13 +85,21 @@ def _lite_compress(text: str) -> str:
             if word.lower().strip(".,!?") not in _FILLER_WORDS
         ]
         lines.append((indent + " ".join(words)).rstrip())
-    return "\n".join(lines).strip()
+    result = "\n".join(lines)
+    return leading + result + trailing if result.strip() else text
 
 
 class LLMLingua2Compressor(CustomGuardrail):
-    def __init__(self, guardrail_name: str | None = None, cache_aware: bool = True, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        guardrail_name: str | None = None,
+        cache_aware: bool = True,
+        compress_system: bool = False,
+        **kwargs: Any,
+    ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
         self.cache_aware = cache_aware
+        self.compress_system = compress_system
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
@@ -125,21 +136,40 @@ class LLMLingua2Compressor(CustomGuardrail):
                             return True
         return False
 
-    def _compress_text(self, text: str) -> str:
+    def _compress_prose(self, text: str) -> str:
         if not text.strip():
             return text
+        compressed: str | None = None
         if self._compressor is not None:
             try:
                 out = self._compressor.compress_prompt(text, ratio=0.75)  # type: ignore[attr-defined]
                 if isinstance(out, dict):
-                    compressed = out.get("compressed_prompt", text)
+                    value = out.get("compressed_prompt", text)
                 else:
-                    compressed = str(out)
-                return compressed if isinstance(compressed, str) and compressed.strip() else text
+                    value = str(out)
+                if isinstance(value, str) and value.strip():
+                    compressed = value
             except Exception:
-                pass
-        compressed = _lite_compress(text)
-        return compressed if compressed.strip() else text
+                compressed = None
+        if compressed is None:
+            compressed = _lite_compress(text)
+        if not compressed or not compressed.strip():
+            return text
+        # Never expand a segment; a no-op is safer than losing the original.
+        return compressed if len(compressed) < len(text) else text
+
+    def _compress_text(self, text: str) -> str:
+        if not text.strip():
+            return text
+        segments = split_prose_and_preserved(text)
+        if len(segments) == 1 and segments[0][0] == "prose":
+            return self._compress_prose(text)
+        parts = [
+            value if kind == "preserved" else self._compress_prose(value)
+            for kind, value in segments
+        ]
+        result = "".join(parts)
+        return result if len(result) < len(text) else text
 
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
         if input_type != "request":
@@ -160,8 +190,9 @@ class LLMLingua2Compressor(CustomGuardrail):
             if role not in ("system", "user", "assistant"):
                 out.append(msg)
                 continue
-            # cache-aware: skip system prompt compression for cached requests
-            if cached and role == "system":
+            # System prompts carry instructions and negations; leave them alone
+            # unless explicitly opted in. Cached requests always keep them.
+            if role == "system" and (not self.compress_system or cached):
                 out.append(msg)
                 continue
             text = _content_to_text(msg.get("content"))

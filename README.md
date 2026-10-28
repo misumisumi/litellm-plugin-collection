@@ -8,7 +8,7 @@ loop detection, and budget-aware context management.
 | Plugin | Target | Description |
 |---|---|---|
 | `dcp_pruner` | `tool` / `tool_result` only | Dynamic context pruning inspired by [OpenCode DCP](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning). Removes duplicate tool outputs and elides oversized ones. |
-| `llmlingua_compressor` | `system` / `user` / `assistant` text only | Prompt compression using [LLMLingua-2](https://github.com/microsoft/LLMLingua) (base model). Falls back to lite compression if unavailable. |
+| `llmlingua_compressor` | `user` / `assistant` prose only | Prompt compression using [LLMLingua-2](https://github.com/microsoft/LLMLingua) (base model). System prompts and meaningful spans are preserved. Falls back to lite compression if unavailable. |
 | `context_budget` | All messages | Budget-aware context truncation and pruning. |
 | `compression_summary` | All messages (read-only) | Aggregates overall compression stats (tokens before/after, ratio). |
 | `loop_guard` | Request-level | Session-aware detection of repeated identical user turns. Ignores tool results and continuations of the current turn. |
@@ -89,6 +89,23 @@ services.litellm = {
 };
 ```
 
+## Preserved content
+
+Compression is only safe for prose. Following
+[OmniRoute](https://github.com/diegosouzapw/OmniRoute)'s preservation model, the
+compressors keep these spans verbatim:
+
+- system prompts (opt in with `compress_system: true`)
+- agent instruction envelopes (`<system-reminder>`, `<instructions>`, `<project-instructions>`)
+- fenced code, inline code, frontmatter
+- math / LaTeX, Markdown headings, tables and links
+- URLs, file paths, env vars, versions, dotted identifiers and function calls
+- error messages, stack traces, secrets / private keys and DDL
+- XML tags, negations and absolutes (`not`, `never`, `must`, `don't`, ...)
+
+System prompts are never compressed by default. Set `compress_system: true` to
+opt in; cached requests always keep the system prompt unchanged.
+
 ## Loop guard
 
 `loop_guard` only counts **new user turns**. A request that continues the same
@@ -111,7 +128,7 @@ original user text (see `examples/config.yaml`).
 ## Scopes
 
 - **DCP**: `tool` / `tool_result` only
-- **llmlingua-2**: `system` / `user` / `assistant` text only
+- **llmlingua-2**: `user` / `assistant` prose only (system prompt preserved by default)
 - **Headroom**: upstream standard (tool + context)
 
 ## License
