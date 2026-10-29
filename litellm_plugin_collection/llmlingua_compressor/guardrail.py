@@ -107,10 +107,16 @@ class LLMLingua2Compressor(CustomGuardrail):
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
+                try:
+                    import torch
+
+                    device_map = "cuda" if torch.cuda.is_available() else "cpu"
+                except Exception:
+                    device_map = "cpu"
                 self._compressor = _PromptCompressor(
                     model_name="microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
                     use_llmlingua2=True,
-                    device_map="cpu",
+                    device_map=device_map,
                 )  # type: ignore
             except Exception:
                 self._compressor = None
