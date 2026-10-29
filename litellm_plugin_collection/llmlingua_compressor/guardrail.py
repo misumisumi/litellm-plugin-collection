@@ -110,6 +110,7 @@ class LLMLingua2Compressor(CustomGuardrail):
                 self._compressor = _PromptCompressor(
                     model_name="microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
                     use_llmlingua2=True,
+                    device_map="cpu",
                 )  # type: ignore
             except Exception:
                 self._compressor = None
@@ -146,7 +147,7 @@ class LLMLingua2Compressor(CustomGuardrail):
         compressed: str | None = None
         if self._compressor is not None:
             try:
-                out = self._compressor.compress_prompt(text, ratio=self.compression_rate)  # type: ignore[attr-defined]
+                out = self._compressor.compress_prompt(text, rate=self.compression_rate)  # type: ignore[attr-defined]
                 if isinstance(out, dict):
                     value = out.get("compressed_prompt", text)
                 else:

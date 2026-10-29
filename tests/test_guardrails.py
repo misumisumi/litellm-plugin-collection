@@ -387,6 +387,19 @@ class LLMLinguaTests(unittest.TestCase):
             "please just keep this system prompt",
         )
 
+    def test_real_compressor_is_called_with_rate(self):
+        class FakeCompressor:
+            def compress_prompt(self, text, rate=0.5):
+                return {"compressed_prompt": "compressed output"}
+
+        guard = LLMLingua2Compressor(min_prompt_chars=0, compression_rate=0.33)
+        guard._compressor = FakeCompressor()
+        text = "Please just explain this with enough length to pass."
+        result, _ = _apply(guard, [{"role": "user", "content": text}])
+        self.assertEqual(
+            result["structured_messages"][0]["content"], "compressed output"
+        )
+
     def test_empty_or_short_text_is_not_blanked(self):
         result, _ = _apply(self.guard, [{"role": "user", "content": "OK"}])
         self.assertEqual(result["structured_messages"][0]["content"], "OK")
