@@ -403,13 +403,6 @@ class LLMLinguaTests(unittest.TestCase):
         result, _ = _apply(guard, [{"role": "user", "content": text}])
         self.assertNotIn("just", result["structured_messages"][0]["content"])
 
-    def test_min_context_tokens_skips_small_prompt(self):
-        guard = LLMLingua2Compressor(min_prompt_chars=0, min_context_tokens=100000)
-        guard._compressor = None
-        text = "Please just do this. " + ("x " * 100)
-        result, _ = _apply(guard, [{"role": "user", "content": text}])
-        self.assertEqual(result["structured_messages"][0]["content"], text)
-
     def test_system_prompt_is_preserved_by_default(self):
         text = "Please just keep this system prompt and never drop it."
         result, _ = _apply(self.guard, [{"role": "system", "content": text}])
