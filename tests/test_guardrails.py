@@ -349,7 +349,7 @@ class CompressionSummaryTests(unittest.TestCase):
 
 class LLMLinguaTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.guard = LLMLingua2Compressor(cache_aware=True, min_prompt_chars=0)
+        self.guard = LLMLingua2Compressor(cache_aware=True, min_prompt_tokens=0)
         self.guard._compressor = None  # exercise the deterministic fallback
 
     def test_filler_is_removed_without_losing_structure(self):
@@ -392,7 +392,7 @@ class LLMLinguaTests(unittest.TestCase):
             def compress_prompt(self, text, rate=0.5):
                 return {"compressed_prompt": "compressed output"}
 
-        guard = LLMLingua2Compressor(min_prompt_chars=0, compression_rate=0.33)
+        guard = LLMLingua2Compressor(min_prompt_tokens=0, compression_rate=0.33)
         guard._compressor = FakeCompressor()
         text = "Please just explain this with enough length to pass."
         result, _ = _apply(guard, [{"role": "user", "content": text}])
@@ -405,14 +405,36 @@ class LLMLinguaTests(unittest.TestCase):
         self.assertEqual(result["structured_messages"][0]["content"], "OK")
 
     def test_short_prompt_is_skipped_with_threshold(self):
-        guard = LLMLingua2Compressor(min_prompt_chars=2000)
+        guard = LLMLingua2Compressor(min_prompt_tokens=2000)
         guard._compressor = None
         text = "Please just do this."
         result, _ = _apply(guard, [{"role": "user", "content": text}])
         self.assertEqual(result["structured_messages"][0]["content"], text)
 
+    def test_threshold_uses_total_non_system_tokens(self):
+        # Each turn is below the floor, but the conversation as a whole is above
+        # it. OmniRoute judges the concatenated non-system text, so both must
+        # still be compressed.
+        guard = LLMLingua2Compressor(min_prompt_tokens=50)
+        guard._compressor = None
+        text = "Please just do this. " + ("x " * 50)
+        messages = [
+            {"role": "user", "content": text},
+            {"role": "user", "content": text},
+        ]
+        result, _ = _apply(guard, messages)
+        for message in result["structured_messages"]:
+            self.assertNotIn("just", message["content"])
+
+    def test_legacy_min_prompt_chars_is_accepted(self):
+        guard = LLMLingua2Compressor(min_prompt_chars=0)
+        guard._compressor = None
+        text = "Please just do this. " + ("x " * 100)
+        result, _ = _apply(guard, [{"role": "user", "content": text}])
+        self.assertNotIn("just", result["structured_messages"][0]["content"])
+
     def test_long_prompt_is_compressed_with_threshold(self):
-        guard = LLMLingua2Compressor(min_prompt_chars=10)
+        guard = LLMLingua2Compressor(min_prompt_tokens=10)
         guard._compressor = None
         text = "Please just do this. " + ("x " * 100)
         result, _ = _apply(guard, [{"role": "user", "content": text}])
@@ -424,7 +446,7 @@ class LLMLinguaTests(unittest.TestCase):
         self.assertEqual(result["structured_messages"][0]["content"], text)
 
     def test_system_prompt_can_be_compressed_when_enabled(self):
-        guard = LLMLingua2Compressor(compress_system=True, min_prompt_chars=0)
+        guard = LLMLingua2Compressor(compress_system=True, min_prompt_tokens=0)
         guard._compressor = None
         text = "Please just keep this system prompt and never drop it."
         result, _ = _apply(guard, [{"role": "system", "content": text}])

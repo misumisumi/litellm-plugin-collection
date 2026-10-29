@@ -107,10 +107,13 @@ compressors keep these spans verbatim:
 System prompts are never compressed by default. Set `compress_system: true` to
 opt in; cached requests always keep the system prompt unchanged.
 
-Prompts shorter than `min_prompt_chars` (default 2000 characters) are left
-untouched. Set it to 0 to compress every prompt. The compression ratio is
-controlled by `compression_rate` (default 0.50, matching LLMLingua-2's
-standard 2x compression).
+Requests whose non-system text is estimated below `min_prompt_tokens` (default
+2000 tokens, the same floor OmniRoute uses) are left untouched. The floor is
+evaluated over the whole request, not per message, so a long conversation made
+of short turns is still compressed. Set it to 0 to compress every prompt. The
+compression ratio is controlled by `compression_rate` (default 0.50, matching
+LLMLingua-2's standard 2x compression). `min_prompt_chars` is still accepted as
+a deprecated alias.
 
 
 ## Loop guard

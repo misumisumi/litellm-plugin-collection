@@ -36,6 +36,11 @@ except Exception:
     _HAS_LLMLINGUA = False
 
 
+def _estimate_tokens(text: str) -> int:
+    """Estimate tokens the same way OmniRoute's compression floor does (4 chars/token)."""
+    return len(text) // 4 + 1 if text else 0
+
+
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -107,17 +112,22 @@ class LLMLingua2Compressor(CustomGuardrail):
         cache_aware: bool = True,
         compress_system: bool = False,
         compress_assistant: bool = False,
-        min_prompt_chars: int = 2000,
+        min_prompt_tokens: int | None = None,
         compression_rate: float = 0.50,
         model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
         cache_size: int = 256,
+        # Deprecated: character-based threshold kept for config compatibility.
+        # It is interpreted as a token count, matching OmniRoute's `minTokens`.
+        min_prompt_chars: int | None = None,
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
         self.cache_aware = cache_aware
         self.compress_system = compress_system
         self.compress_assistant = compress_assistant
-        self.min_prompt_chars = max(0, int(min_prompt_chars))
+        if min_prompt_tokens is None:
+            min_prompt_tokens = min_prompt_chars if min_prompt_chars is not None else 2000
+        self.min_prompt_tokens = max(0, int(min_prompt_tokens))
         self.compression_rate = min(0.99, max(0.05, float(compression_rate)))
         self.model_name = model_name
         self._cache: OrderedDict[str, str] = OrderedDict()
@@ -220,7 +230,40 @@ class LLMLingua2Compressor(CustomGuardrail):
         if not isinstance(structured, list):
             return inputs
         cached = self._is_cached_request(request_data or {})
-        tokens_before = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in structured)
+        tokens_before = sum(
+            _estimate_tokens(_content_to_text(m.get("content") if isinstance(m, dict) else ""))
+            for m in structured
+        )
+
+        # OmniRoute-aligned floor: judge the whole request's non-system text,
+        # not each message in isolation. A 6k-token conversation made of short
+        # turns must still be compressed.
+        non_system_text = "\n".join(
+            _content_to_text(m.get("content"))
+            for m in structured
+            if isinstance(m, dict) and m.get("role") != "system"
+        )
+        if (
+            self.min_prompt_tokens > 0
+            and _estimate_tokens(non_system_text) < self.min_prompt_tokens
+        ):
+            try:
+                self.add_standard_logging_guardrail_information_to_request_data(
+                    guardrail_json_response={
+                        "tokens_before": tokens_before,
+                        "tokens_after": tokens_before,
+                        "tokens_saved": 0,
+                        "compression_ratio": 0.0,
+                        "skipped": "below_min_prompt_tokens",
+                        "min_prompt_tokens": self.min_prompt_tokens,
+                    },
+                    request_data=request_data,
+                    guardrail_status="success",
+                )
+            except Exception:
+                pass
+            return inputs
+
         out: list[Any] = []
         for msg in structured:
             if not isinstance(msg, dict):
@@ -242,16 +285,16 @@ class LLMLingua2Compressor(CustomGuardrail):
             if not text.strip():
                 out.append(msg)
                 continue
-            if self.min_prompt_chars > 0 and len(text) < self.min_prompt_chars:
-                out.append(msg)
-                continue
             compressed = await asyncio.to_thread(self._compress_text, text)
             if compressed == text:
                 out.append(msg)
                 continue
             new_content = _text_to_content(msg.get("content"), compressed)
             out.append(msg if new_content is msg.get("content") else {**msg, "content": new_content})
-        tokens_after = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in out)
+        tokens_after = sum(
+            _estimate_tokens(_content_to_text(m.get("content") if isinstance(m, dict) else ""))
+            for m in out
+        )
         ratio = round(1 - (tokens_after / tokens_before), 4) if tokens_before > 0 else 0.0
         try:
             self.add_standard_logging_guardrail_information_to_request_data(
