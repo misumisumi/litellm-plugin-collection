@@ -319,6 +319,7 @@ class _SessionState:
     seen_test_output: set[str] = field(default_factory=set)
     progress_streak: int = 0
     no_progress_streak: int = 0
+    suspicious_streak: int = 0
     protocol_failures: int = 0
     intervention_count: int = 0
     pending_intervention: bool = False
@@ -342,6 +343,7 @@ class LoopGuard(CustomGuardrail):
         repeat_tool_error_count: int = 3,
         no_progress_turns: int = 3,
         max_interventions: int = 3,
+        confirm_turns: int = 3,
         intervention_reset_progress_turns: int = 2,
         jev_trigger: float = 0.4,
         jev_url: str | None = None,
@@ -362,6 +364,7 @@ class LoopGuard(CustomGuardrail):
         self.repeat_tool_error_count = max(2, int(repeat_tool_error_count))
         self.no_progress_turns = max(1, int(no_progress_turns))
         self.max_interventions = max(1, int(max_interventions))
+        self.confirm_turns = max(1, int(confirm_turns))
         self.intervention_reset_progress_turns = max(1, int(intervention_reset_progress_turns))
         self.jev_trigger = float(jev_trigger)
         self.jev_url = jev_url
@@ -497,6 +500,7 @@ class LoopGuard(CustomGuardrail):
             state.intervention_count = 0
             state.pending_intervention = False
             state.loop_detected = False
+            state.suspicious_streak = 0
             state.protocol_failures = 0
 
         # Apply a pending recovery from the previous response.
@@ -706,12 +710,41 @@ class LoopGuard(CustomGuardrail):
                 state.intervention_count = 0
                 state.pending_intervention = False
                 state.loop_detected = False
+                state.suspicious_streak = 0
 
         score = self._noisy_or(signals)
+
+        # Built-in signals are already repetition-based, so they confirm
+        # immediately. The noisy-OR score alone requires confirm_turns
+        # consecutive suspicious responses.
+        builtin_confirmed = any(
+            key in signals
+            for key in (
+                "repeated_tool_call",
+                "repeated_tool_error",
+                "no_progress",
+                "tool_protocol",
+                "repeated_user_turn",
+            )
+        )
+
         if score >= self.threshold:
+            state.suspicious_streak += 1
+        else:
+            state.suspicious_streak = 0
+            if not state.pending_intervention:
+                state.loop_detected = False
+                state.intervention_count = 0
+
+        confirmed = builtin_confirmed or state.suspicious_streak >= self.confirm_turns
+        if confirmed and not state.pending_intervention:
             state.loop_detected = True
             state.pending_intervention = True
             state.intervention_count += 1
+        elif confirmed and state.pending_intervention:
+            # A confirmed loop that is still pending keeps its intervention
+            # level; do not double-count while the recovery is in flight.
+            pass
 
         return response
 

@@ -74,7 +74,7 @@ class LoopGuardTests(unittest.TestCase):
         return data
 
     def test_repeated_assistant_response_triggers_next_request(self):
-        guard = LoopGuard(max_interventions=1, threshold=0.5)
+        guard = LoopGuard(max_interventions=1, threshold=0.5, confirm_turns=1)
         response = {"choices": [{"message": {"role": "assistant", "content": "same answer"}}]}
         messages = [{"role": "user", "content": "hello"}]
         _apply(guard, messages, "s1")
@@ -89,6 +89,7 @@ class LoopGuardTests(unittest.TestCase):
         guard = LoopGuard(
             max_interventions=1,
             threshold=0.5,
+            confirm_turns=1,
             repeat_tool_call_count=2,
         )
         response = {
@@ -117,6 +118,7 @@ class LoopGuardTests(unittest.TestCase):
         guard = LoopGuard(
             max_interventions=1,
             threshold=0.5,
+            confirm_turns=1,
             repeat_tool_call_count=2,
         )
         response = {
@@ -149,11 +151,35 @@ class LoopGuardTests(unittest.TestCase):
         self._post(guard, messages, response)
         _apply(guard, messages, "s1")
         self._post(guard, messages, response)
-        # Third apply should inject recovery instead of stopping.
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        # Fourth apply should inject recovery instead of stopping.
         result, data = _apply(guard, messages, "s1")
         system = next(m for m in result["structured_messages"] if m.get("role") == "system")
         self.assertIn("Recovery", system["content"])
         self.assertIn("loop_guard_intervention", data)
+
+    def test_confirm_turns_delays_noisy_or_intervention(self):
+        guard = LoopGuard(
+            max_interventions=3,
+            threshold=0.5,
+            confirm_turns=3,
+            no_progress_turns=100,
+        )
+        response = {"choices": [{"message": {"role": "assistant", "content": "same answer"}}]}
+        messages = [{"role": "user", "content": "hello"}]
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        self.assertFalse(guard._sessions["s1"].pending_intervention)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        self.assertFalse(guard._sessions["s1"].pending_intervention)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        self.assertFalse(guard._sessions["s1"].pending_intervention)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        self.assertTrue(guard._sessions["s1"].pending_intervention)
 
     def test_tool_result_with_extra_text_is_still_a_continuation(self):
         for i in range(5):
