@@ -85,23 +85,24 @@ def _resolve_model_params(
     api_base: str | None = None,
     api_key: str | None = None,
 ) -> tuple[str, str | None, str | None]:
+    # Explicit params always win.
     if api_base or api_key:
         return model_name, api_base, api_key
+    # LiteLLM proxy keeps the configured model list in its Router. This is the
+    # most reliable source for custom/local models registered in config.yaml.
     try:
-        import litellm
+        from litellm.proxy.proxy_server import llm_router
 
-        for entry in getattr(litellm, "model_list", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("model_name") != model_name and entry.get("model") != model_name:
-                continue
-            params = entry.get("litellm_params", {})
-            if isinstance(params, dict):
-                return (
-                    params.get("model", model_name),
-                    params.get("api_base"),
-                    params.get("api_key"),
-                )
+        if llm_router is not None and hasattr(llm_router, "get_model_info"):
+            info = llm_router.get_model_info(model_name)
+            if isinstance(info, dict):
+                params = info.get("litellm_params", {})
+                if isinstance(params, dict):
+                    return (
+                        params.get("model", model_name),
+                        params.get("api_base"),
+                        params.get("api_key"),
+                    )
     except Exception:
         pass
     return model_name, None, None

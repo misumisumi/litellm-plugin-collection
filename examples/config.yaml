@@ -51,8 +51,6 @@ guardrails:
       guardrail: litellm_plugin_collection.llm_summarizer.guardrail
       mode: pre_call
       summary_model: qwen3.8-flash-next
-      summary_api_base: http://10.250.0.55:9010/v1
-      summary_api_key: dummy
       summary_threshold_tokens: 0
       summary_target_tokens: 4096
       preserve_recent_turns: 4
