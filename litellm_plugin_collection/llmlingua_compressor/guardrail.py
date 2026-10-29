@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from litellm_plugin_collection._model_context import detect_context_limit
 from litellm_plugin_collection._preservation import split_prose_and_preserved
 
 try:
@@ -96,12 +97,18 @@ class LLMLingua2Compressor(CustomGuardrail):
         cache_aware: bool = True,
         compress_system: bool = False,
         min_prompt_chars: int = 2000,
+        compression_rate: float = 0.75,
+        min_context_tokens: int = 0,
+        min_context_ratio: float = 0.0,
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
         self.cache_aware = cache_aware
         self.compress_system = compress_system
         self.min_prompt_chars = max(0, int(min_prompt_chars))
+        self.compression_rate = min(0.99, max(0.05, float(compression_rate)))
+        self.min_context_tokens = max(0, int(min_context_tokens))
+        self.min_context_ratio = min(1.0, max(0.0, float(min_context_ratio)))
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
@@ -144,7 +151,7 @@ class LLMLingua2Compressor(CustomGuardrail):
         compressed: str | None = None
         if self._compressor is not None:
             try:
-                out = self._compressor.compress_prompt(text, ratio=0.75)  # type: ignore[attr-defined]
+                out = self._compressor.compress_prompt(text, ratio=self.compression_rate)  # type: ignore[attr-defined]
                 if isinstance(out, dict):
                     value = out.get("compressed_prompt", text)
                 else:
@@ -182,7 +189,15 @@ class LLMLingua2Compressor(CustomGuardrail):
         if not isinstance(structured, list):
             return inputs
         cached = self._is_cached_request(request_data or {})
-        tokens_before = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in structured)
+        total_tokens = sum(len(_content_to_text(m.get("content") if isinstance(m, dict) else "")) // 4 + 1 for m in structured)
+        tokens_before = total_tokens
+        # Context-length threshold: only compress when the prompt is large enough.
+        threshold = self.min_context_tokens
+        if threshold <= 0 and self.min_context_ratio > 0:
+            limit = detect_context_limit(request_data, inputs)
+            threshold = int(limit * self.min_context_ratio)
+        if threshold > 0 and total_tokens < threshold:
+            return inputs
         out: list[Any] = []
         for msg in structured:
             if not isinstance(msg, dict):

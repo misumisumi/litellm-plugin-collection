@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from litellm_plugin_collection._model_context import detect_context_limit
+
 from litellm_plugin_collection._preservation import truncate_preserved
 
 try:
@@ -58,7 +60,7 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 class ContextBudgetGuardrail(CustomGuardrail):
     def __init__(self, guardrail_name: str | None = None, safety_ratio: float = 0.90,
-                 reserve_output_tokens: int = 8192, context_limit: int = 128000, **kwargs: Any) -> None:
+                 reserve_output_tokens: int = 8192, context_limit: int = 0, **kwargs: Any) -> None:
         self.guardrail_name = guardrail_name or "context-budget"
         self.safety_ratio = safety_ratio
         self.reserve_output_tokens = reserve_output_tokens
@@ -76,7 +78,10 @@ class ContextBudgetGuardrail(CustomGuardrail):
         structured = inputs.get("structured_messages")
         if not isinstance(structured, list) or not structured:
             return inputs
-        budget = int(self.context_limit * self.safety_ratio) - self.reserve_output_tokens
+        context_limit = self.context_limit
+        if context_limit <= 0:
+            context_limit = detect_context_limit(request_data, inputs)
+        budget = int(context_limit * self.safety_ratio) - self.reserve_output_tokens
         if budget <= 0:
             return inputs
         if _estimate_tokens(structured) <= budget:

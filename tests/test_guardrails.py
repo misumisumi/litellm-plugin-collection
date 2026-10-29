@@ -403,6 +403,13 @@ class LLMLinguaTests(unittest.TestCase):
         result, _ = _apply(guard, [{"role": "user", "content": text}])
         self.assertNotIn("just", result["structured_messages"][0]["content"])
 
+    def test_min_context_tokens_skips_small_prompt(self):
+        guard = LLMLingua2Compressor(min_prompt_chars=0, min_context_tokens=100000)
+        guard._compressor = None
+        text = "Please just do this. " + ("x " * 100)
+        result, _ = _apply(guard, [{"role": "user", "content": text}])
+        self.assertEqual(result["structured_messages"][0]["content"], text)
+
     def test_system_prompt_is_preserved_by_default(self):
         text = "Please just keep this system prompt and never drop it."
         result, _ = _apply(self.guard, [{"role": "system", "content": text}])
@@ -489,6 +496,26 @@ class ContextBudgetTests(unittest.TestCase):
         messages = [{"role": "user", "content": "hi"}]
         result, _ = _apply(guard, messages)
         self.assertEqual(result["structured_messages"], messages)
+
+    def test_auto_detects_context_limit_from_request_data(self):
+        guard = ContextBudgetGuardrail(context_limit=0, safety_ratio=0.9, reserve_output_tokens=0)
+        messages = [
+            {"role": "user", "content": "x " * 1000},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "latest"},
+        ]
+        data = _request(messages)
+        data["model_info"] = {"max_input_tokens": 300}
+        result = asyncio.run(
+            guard.apply_guardrail(
+                inputs={"structured_messages": messages, "texts": []},
+                request_data=data,
+                input_type="request",
+                logging_obj=None,
+            )
+        )
+        # The old turn should be dropped or truncated under the small budget.
+        self.assertNotEqual(result["structured_messages"], messages)
 
 
 if __name__ == "__main__":
