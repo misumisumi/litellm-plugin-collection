@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import unittest
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from litellm_plugin_collection.compression_summary.guardrail import CompressionSummaryGuardrail
 from litellm_plugin_collection.context_budget.guardrail import ContextBudgetGuardrail
 from litellm_plugin_collection.dcp_pruner.guardrail import DCPPrunder
+from litellm_plugin_collection.llm_summarizer.guardrail import LLMSummarizerGuardrail
 from litellm_plugin_collection.llmlingua_compressor.guardrail import LLMLingua2Compressor
 from litellm_plugin_collection.loop_guard.guardrail import LoopGuard
 
@@ -509,6 +511,95 @@ class ContextBudgetTests(unittest.TestCase):
         )
         # The old turn should be dropped or truncated under the small budget.
         self.assertNotEqual(result["structured_messages"], messages)
+
+
+class LLMSummarizerTests(unittest.TestCase):
+    def test_under_threshold_does_not_call_llm(self):
+        guard = LLMSummarizerGuardrail(summary_threshold_tokens=100000)
+        messages = [
+            {"role": "user", "content": "short"},
+            {"role": "assistant", "content": "short answer"},
+        ]
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
+            result, _ = _apply(guard, messages)
+            self.assertFalse(mock.called)
+            self.assertEqual(result["structured_messages"], messages)
+
+    def test_over_threshold_calls_llm_and_replaces_older_messages(self):
+        guard = LLMSummarizerGuardrail(
+            summary_threshold_tokens=10,
+            preserve_recent_turns=1,
+            max_summary_calls=3,
+        )
+        messages = [
+            {"role": "user", "content": "old request " * 50},
+            {"role": "assistant", "content": "old answer " * 50},
+            {"role": "user", "content": "latest question"},
+        ]
+        fake = {"choices": [{"message": {"role": "assistant", "content": "summary text"}}]}
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
+            mock.return_value = fake
+            result, _ = _apply(guard, messages)
+            self.assertTrue(mock.called)
+            self.assertEqual(len(result["structured_messages"]), 2)
+            self.assertIn("[LLM Summary", result["structured_messages"][0]["content"])
+            self.assertEqual(result["structured_messages"][1], messages[2])
+
+    def test_fail_open_on_llm_error(self):
+        guard = LLMSummarizerGuardrail(
+            summary_threshold_tokens=10,
+            preserve_recent_turns=1,
+        )
+        messages = [
+            {"role": "user", "content": "old request " * 50},
+            {"role": "assistant", "content": "old answer " * 50},
+            {"role": "user", "content": "latest question"},
+        ]
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
+            mock.side_effect = RuntimeError("boom")
+            result, _ = _apply(guard, messages)
+            self.assertTrue(mock.called)
+            self.assertEqual(result["structured_messages"], messages)
+
+    def test_max_summary_calls_is_respected(self):
+        guard = LLMSummarizerGuardrail(
+            summary_threshold_tokens=1,
+            preserve_recent_turns=1,
+            max_summary_calls=1,
+        )
+        messages = [
+            {"role": "user", "content": "old request " * 50},
+            {"role": "assistant", "content": "old answer " * 50},
+            {"role": "user", "content": "latest question"},
+        ]
+        fake = {"choices": [{"message": {"role": "assistant", "content": "summary text"}}]}
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
+            mock.return_value = fake
+            _apply(guard, messages)
+            self.assertEqual(mock.call_count, 1)
+            # second call should not invoke the LLM again
+            _apply(guard, messages)
+            self.assertEqual(mock.call_count, 1)
+
+    def test_skip_marker_prevents_llm_call(self):
+        guard = LLMSummarizerGuardrail(summary_threshold_tokens=10, preserve_recent_turns=1)
+        messages = [
+            {"role": "user", "content": "old request " * 50},
+            {"role": "assistant", "content": "old answer " * 50},
+            {"role": "user", "content": "latest question"},
+        ]
+        data = _request(messages)
+        data["skip_llm_summarizer"] = True
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock:
+            asyncio.run(
+                guard.apply_guardrail(
+                    inputs={"structured_messages": messages, "texts": []},
+                    request_data=data,
+                    input_type="request",
+                    logging_obj=None,
+                )
+            )
+            self.assertFalse(mock.called)
 
 
 if __name__ == "__main__":

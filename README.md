@@ -11,6 +11,7 @@ loop detection, and budget-aware context management.
 | `llmlingua_compressor` | `user` / `assistant` prose only | Prompt compression using [LLMLingua-2](https://github.com/microsoft/LLMLingua) (base model). System prompts and meaningful spans are preserved. Falls back to lite compression if unavailable. |
 | `context_budget` | All messages | Budget-aware context truncation and pruning. |
 | `compression_summary` | All messages (read-only) | Aggregates overall compression stats (tokens before/after, ratio). |
+| `llm_summarizer` | All messages | LLM-driven summarization of older turns when the prompt exceeds a threshold. Only calls the LLM when needed. |
 | `loop_guard` | Request-level | Session-aware detection of repeated identical user turns. Ignores tool results and continuations of the current turn. |
 
 ## DCP (Dynamic Context Pruning)
