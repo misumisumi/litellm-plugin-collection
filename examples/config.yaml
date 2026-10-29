@@ -43,6 +43,7 @@ guardrails:
       targets: ["user", "assistant"]
       cache_aware: true
       compress_system: false
+      compress_assistant: false
       min_prompt_chars: 2000
   - guardrail_name: headroom-comp
     litellm_params: { guardrail: headroom, mode: pre_call }

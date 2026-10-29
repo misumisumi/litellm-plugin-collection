@@ -148,7 +148,7 @@ original user text (see `examples/config.yaml`).
 ## Scopes
 
 - **DCP**: `tool` / `tool_result` only
-- **llmlingua-2**: `user` / `assistant` prose only (system prompt preserved by default)
+- **llmlingua-2**: `user` prose only by default (system and assistant preserved unless opted in)
 - **Headroom**: upstream standard (tool + context)
 
 ## License

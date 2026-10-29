@@ -6,7 +6,18 @@ paths, URLs, errors, secrets and negations are shielded from the compressor.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import time
+from collections import OrderedDict
 from typing import Any
+
+try:
+    import torch
+
+    torch.set_num_threads(1)
+except Exception:
+    pass
 
 from litellm_plugin_collection._preservation import split_prose_and_preserved
 
@@ -95,17 +106,22 @@ class LLMLingua2Compressor(CustomGuardrail):
         guardrail_name: str | None = None,
         cache_aware: bool = True,
         compress_system: bool = False,
+        compress_assistant: bool = False,
         min_prompt_chars: int = 2000,
         compression_rate: float = 0.50,
         model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
+        cache_size: int = 256,
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
         self.cache_aware = cache_aware
         self.compress_system = compress_system
+        self.compress_assistant = compress_assistant
         self.min_prompt_chars = max(0, int(min_prompt_chars))
         self.compression_rate = min(0.99, max(0.05, float(compression_rate)))
         self.model_name = model_name
+        self._cache: OrderedDict[str, str] = OrderedDict()
+        self._cache_size = max(1, int(cache_size))
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
@@ -174,15 +190,26 @@ class LLMLingua2Compressor(CustomGuardrail):
     def _compress_text(self, text: str) -> str:
         if not text.strip():
             return text
+        key = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         segments = split_prose_and_preserved(text)
         if len(segments) == 1 and segments[0][0] == "prose":
-            return self._compress_prose(text)
-        parts = [
-            value if kind == "preserved" else self._compress_prose(value)
-            for kind, value in segments
-        ]
-        result = "".join(parts)
-        return result if len(result) < len(text) else text
+            result = self._compress_prose(text)
+        else:
+            parts = [
+                value if kind == "preserved" else self._compress_prose(value)
+                for kind, value in segments
+            ]
+            result = "".join(parts)
+            if not (len(result) < len(text)):
+                result = text
+        if result and result.strip() and len(result) < len(text):
+            self._cache[key] = result
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return result if result and result.strip() else text
 
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
         if input_type != "request":
@@ -203,9 +230,12 @@ class LLMLingua2Compressor(CustomGuardrail):
             if role not in ("system", "user", "assistant"):
                 out.append(msg)
                 continue
-            # System prompts carry instructions and negations; leave them alone
-            # unless explicitly opted in. Cached requests always keep them.
+            # System and assistant prompts carry instructions and reasoning;
+            # leave them alone unless explicitly opted in.
             if role == "system" and (not self.compress_system or cached):
+                out.append(msg)
+                continue
+            if role == "assistant" and not self.compress_assistant:
                 out.append(msg)
                 continue
             text = _content_to_text(msg.get("content"))
@@ -215,7 +245,7 @@ class LLMLingua2Compressor(CustomGuardrail):
             if self.min_prompt_chars > 0 and len(text) < self.min_prompt_chars:
                 out.append(msg)
                 continue
-            compressed = self._compress_text(text)
+            compressed = await asyncio.to_thread(self._compress_text, text)
             if compressed == text:
                 out.append(msg)
                 continue
