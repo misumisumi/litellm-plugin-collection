@@ -96,7 +96,7 @@ class LLMLingua2Compressor(CustomGuardrail):
         cache_aware: bool = True,
         compress_system: bool = False,
         min_prompt_chars: int = 2000,
-        compression_rate: float = 0.75,
+        compression_rate: float = 0.50,
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"

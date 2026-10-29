@@ -108,7 +108,8 @@ opt in; cached requests always keep the system prompt unchanged.
 
 Prompts shorter than `min_prompt_chars` (default 2000 characters) are left
 untouched. Set it to 0 to compress every prompt. The compression ratio is
-controlled by `compression_rate` (default 0.75).
+controlled by `compression_rate` (default 0.50, matching LLMLingua-2's
+standard 2x compression).
 
 
 ## Loop guard
