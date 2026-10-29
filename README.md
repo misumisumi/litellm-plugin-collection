@@ -106,6 +106,9 @@ compressors keep these spans verbatim:
 System prompts are never compressed by default. Set `compress_system: true` to
 opt in; cached requests always keep the system prompt unchanged.
 
+Prompts shorter than `min_prompt_chars` (default 2000 characters) are left
+untouched. Set it to 0 to compress every prompt.
+
 ## Loop guard
 
 `loop_guard` combines several signals with noisy-OR:

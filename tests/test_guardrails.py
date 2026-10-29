@@ -347,7 +347,7 @@ class CompressionSummaryTests(unittest.TestCase):
 
 class LLMLinguaTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.guard = LLMLingua2Compressor(cache_aware=True)
+        self.guard = LLMLingua2Compressor(cache_aware=True, min_prompt_chars=0)
         self.guard._compressor = None  # exercise the deterministic fallback
 
     def test_filler_is_removed_without_losing_structure(self):
@@ -389,13 +389,27 @@ class LLMLinguaTests(unittest.TestCase):
         result, _ = _apply(self.guard, [{"role": "user", "content": "OK"}])
         self.assertEqual(result["structured_messages"][0]["content"], "OK")
 
+    def test_short_prompt_is_skipped_with_threshold(self):
+        guard = LLMLingua2Compressor(min_prompt_chars=2000)
+        guard._compressor = None
+        text = "Please just do this."
+        result, _ = _apply(guard, [{"role": "user", "content": text}])
+        self.assertEqual(result["structured_messages"][0]["content"], text)
+
+    def test_long_prompt_is_compressed_with_threshold(self):
+        guard = LLMLingua2Compressor(min_prompt_chars=10)
+        guard._compressor = None
+        text = "Please just do this. " + ("x " * 100)
+        result, _ = _apply(guard, [{"role": "user", "content": text}])
+        self.assertNotIn("just", result["structured_messages"][0]["content"])
+
     def test_system_prompt_is_preserved_by_default(self):
         text = "Please just keep this system prompt and never drop it."
         result, _ = _apply(self.guard, [{"role": "system", "content": text}])
         self.assertEqual(result["structured_messages"][0]["content"], text)
 
     def test_system_prompt_can_be_compressed_when_enabled(self):
-        guard = LLMLingua2Compressor(compress_system=True)
+        guard = LLMLingua2Compressor(compress_system=True, min_prompt_chars=0)
         guard._compressor = None
         text = "Please just keep this system prompt and never drop it."
         result, _ = _apply(guard, [{"role": "system", "content": text}])

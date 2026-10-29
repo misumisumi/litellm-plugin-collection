@@ -95,11 +95,13 @@ class LLMLingua2Compressor(CustomGuardrail):
         guardrail_name: str | None = None,
         cache_aware: bool = True,
         compress_system: bool = False,
+        min_prompt_chars: int = 2000,
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
         self.cache_aware = cache_aware
         self.compress_system = compress_system
+        self.min_prompt_chars = max(0, int(min_prompt_chars))
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
@@ -197,6 +199,9 @@ class LLMLingua2Compressor(CustomGuardrail):
                 continue
             text = _content_to_text(msg.get("content"))
             if not text.strip():
+                out.append(msg)
+                continue
+            if self.min_prompt_chars > 0 and len(text) < self.min_prompt_chars:
                 out.append(msg)
                 continue
             compressed = self._compress_text(text)
