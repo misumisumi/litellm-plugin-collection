@@ -97,6 +97,7 @@ class LLMLingua2Compressor(CustomGuardrail):
         compress_system: bool = False,
         min_prompt_chars: int = 2000,
         compression_rate: float = 0.50,
+        model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
         **kwargs: Any,
     ) -> None:
         self.guardrail_name = guardrail_name or "llmlingua-2"
@@ -104,6 +105,7 @@ class LLMLingua2Compressor(CustomGuardrail):
         self.compress_system = compress_system
         self.min_prompt_chars = max(0, int(min_prompt_chars))
         self.compression_rate = min(0.99, max(0.05, float(compression_rate)))
+        self.model_name = model_name
         self._compressor = None
         if _HAS_LLMLINGUA:
             try:
@@ -114,7 +116,7 @@ class LLMLingua2Compressor(CustomGuardrail):
                 except Exception:
                     device_map = "cpu"
                 self._compressor = _PromptCompressor(
-                    model_name="microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
+                    model_name=self.model_name,
                     use_llmlingua2=True,
                     device_map=device_map,
                 )  # type: ignore
