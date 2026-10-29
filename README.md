@@ -108,10 +108,23 @@ opt in; cached requests always keep the system prompt unchanged.
 
 ## Loop guard
 
-`loop_guard` only counts **new user turns**. A request that continues the same
-turn (tool calls, tool results, reasoning retries) is not a loop, even though
-LiteLLM resends the identical last user message every time. Tool-result-only
-messages are ignored.
+`loop_guard` combines several signals with noisy-OR:
+
+- repeated identical user turns
+- assistant response similarity
+- repeated tool calls
+- repeated tool errors
+- no-progress turns
+- ToolProtocolGuard violations
+- optional Jev `progress` / `loop` supplement
+
+A request that continues the same turn (tool calls, tool results, reasoning
+retries) is not a loop, even though LiteLLM resends the identical last user
+message every time. Tool-result-only messages are ignored.
+
+On detection, the guard injects a recovery prompt on the next request and masks
+duplicate tool outputs. After `max_interventions` detections it stops the loop
+with HTTP 400.
 
 The guard needs a stable session identity. It reads, in order:
 

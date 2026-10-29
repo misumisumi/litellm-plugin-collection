@@ -61,6 +61,100 @@ class LoopGuardTests(unittest.TestCase):
             ]
             self._call(messages)
 
+    def _post(self, guard, messages, response, session="s1"):
+        data = _request(messages, session)
+        # Keep request tools empty by default; tests override when needed.
+        asyncio.run(
+            guard.async_post_call_success_hook(
+                user_api_key_dict=None,
+                data=data,
+                response=response,
+            )
+        )
+        return data
+
+    def test_repeated_assistant_response_triggers_next_request(self):
+        guard = LoopGuard(max_interventions=1, threshold=0.5)
+        response = {"choices": [{"message": {"role": "assistant", "content": "same answer"}}]}
+        messages = [{"role": "user", "content": "hello"}]
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        with self.assertRaises(Exception) as ctx:
+            _apply(guard, messages, "s1")
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+    def test_repeated_tool_call_triggers_next_request(self):
+        guard = LoopGuard(
+            max_interventions=1,
+            threshold=0.5,
+            repeat_tool_call_count=2,
+        )
+        response = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    }],
+                }
+            }]
+        }
+        messages = [{"role": "user", "content": "hello"}]
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        with self.assertRaises(Exception) as ctx:
+            _apply(guard, messages, "s1")
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+    def test_protocol_violation_triggers_next_request(self):
+        guard = LoopGuard(
+            max_interventions=1,
+            threshold=0.5,
+            repeat_tool_call_count=2,
+        )
+        response = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "missing_tool", "arguments": "not-json"},
+                    }],
+                }
+            }]
+        }
+        messages = [{"role": "user", "content": "hello"}]
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        with self.assertRaises(Exception) as ctx:
+            _apply(guard, messages, "s1")
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
+
+    def test_recovery_is_injected_before_stop(self):
+        guard = LoopGuard(max_interventions=3, threshold=0.5)
+        response = {"choices": [{"message": {"role": "assistant", "content": "same answer"}}]}
+        messages = [{"role": "user", "content": "hello"}]
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        _apply(guard, messages, "s1")
+        self._post(guard, messages, response)
+        # Third apply should inject recovery instead of stopping.
+        result, data = _apply(guard, messages, "s1")
+        system = next(m for m in result["structured_messages"] if m.get("role") == "system")
+        self.assertIn("Recovery", system["content"])
+        self.assertIn("loop_guard_intervention", data)
+
     def test_tool_result_with_extra_text_is_still_a_continuation(self):
         for i in range(5):
             messages = [
