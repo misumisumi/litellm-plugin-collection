@@ -27,7 +27,14 @@ model_list:
       complexity_router_default_model: kimi-code
 
 guardrails:
-  # Keep loop-guard first: it must see the user's original text, before the
+  # Keep session-affinity first: it must fingerprint the original conversation
+  # before the compression guardrails rewrite it. It only fills a session id
+  # when the caller did not send one.
+  - guardrail_name: opencode-session-affinity
+    litellm_params:
+      guardrail: litellm_plugin_collection.session_affinity.guardrail.OpenCodeSessionAffinity
+      mode: pre_call
+  # Keep loop-guard next: it must see the user's original text, before the
   # compression guardrails rewrite the conversation.
   - guardrail_name: loop-guard
     litellm_params: { guardrail: litellm_plugin_collection.loop_guard.guardrail, mode: pre_call }

@@ -13,6 +13,7 @@ loop detection, and budget-aware context management.
 | `compression_summary` | All messages (read-only) | Aggregates overall compression stats (tokens before/after, ratio). |
 | `llm_summarizer` | All messages | LLM-driven summarization of older turns when the prompt exceeds a threshold. Only calls the LLM when needed. |
 | `loop_guard` | Request-level | Session-aware detection of repeated identical user turns. Ignores tool results and continuations of the current turn. |
+| `session_affinity` | Request-level | Supplies a stable `litellm_session_id` for clients that do not send one, so OpenCode Go (`x-opencode-session`) works through the gateway for any harness. Never overrides a caller-supplied id. |
 
 ## DCP (Dynamic Context Pruning)
 
@@ -53,6 +54,12 @@ See `examples/config.yaml` for a full litellm proxy config.
 
 ```yaml
 guardrails:
+  # Keep session-affinity first: it must fingerprint the original
+  # conversation before the compression guardrails rewrite it.
+  - guardrail_name: opencode-session-affinity
+    litellm_params:
+      guardrail: litellm_plugin_collection.session_affinity.guardrail.OpenCodeSessionAffinity
+      mode: pre_call
   - guardrail_name: dcp-pruner
     litellm_params:
       guardrail: litellm_plugin_collection.dcp_pruner.guardrail
